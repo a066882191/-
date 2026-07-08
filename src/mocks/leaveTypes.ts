@@ -1,0 +1,15 @@
+export const leaveTypes = [
+  { id: 'annual', name: '特休', color: 'bg-emerald-100 text-emerald-700', icon: 'ri-sun-line' },
+  { id: 'family_care', name: '家庭照顧假', color: 'bg-pink-100 text-pink-700', icon: 'ri-home-heart-line' },
+  { id: 'sick', name: '病假', color: 'bg-red-100 text-red-700', icon: 'ri-hospital-line' },
+  { id: 'personal', name: '事假', color: 'bg-amber-100 text-amber-700', icon: 'ri-user-line' },
+  { id: 'mental', name: '身心調適假', color: 'bg-teal-100 text-teal-700', icon: 'ri-mental-health-line' },
+  { id: 'menstrual', name: '生理假', color: 'bg-rose-100 text-rose-700', icon: 'ri-heart-pulse-line' },
+  { id: 'official', name: '公假', color: 'bg-sky-100 text-sky-700', icon: 'ri-building-line' },
+  { id: 'compensatory', name: '補休', color: 'bg-violet-100 text-violet-700', icon: 'ri-time-line' },
+  { id: 'marriage', name: '婚假', color: 'bg-orange-100 text-orange-700', icon: 'ri-hearts-line' },
+  { id: 'bereavement', name: '喪假', color: 'bg-gray-100 text-gray-700', icon: 'ri-emotion-sad-line' },
+  { id: 'paternity', name: '陪產假', color: 'bg-cyan-100 text-cyan-700', icon: 'ri-parent-line' },
+  { id: 'maternity', name: '娩假', color: 'bg-lime-100 text-lime-700', icon: 'ri-women-line' },
+  { id: 'prenatal', name: '產前假', color: 'bg-fuchsia-100 text-fuchsia-700', icon: 'ri-heart-3-line' },
+];
