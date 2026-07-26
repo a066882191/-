@@ -40,6 +40,10 @@ export default function AdminEmployeesPage() {
   // 詳情彈窗狀態
   const [detailEmp, setDetailEmp] = useState<Employee | null>(null);
 
+  // 刪除確認狀態
+  const [deletingEmp, setDeletingEmp] = useState<Employee | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
   const filtered = employees.filter((e) => {
     const q = search.trim().toLowerCase();
     if (!q) return true;
@@ -163,6 +167,69 @@ export default function AdminEmployeesPage() {
 
   function cancelDetail() {
     setDetailEmp(null);
+  }
+
+  function openDeleteConfirm(emp: Employee) {
+    setDeletingEmp(emp);
+  }
+
+  function cancelDelete() {
+    setDeletingEmp(null);
+  }
+
+  async function handleDelete() {
+    if (!deletingEmp) return;
+
+    // 禁止刪除管理員帳號
+    if (deletingEmp.role === 'manager') {
+      showToast('無法刪除管理員帳號');
+      setDeletingEmp(null);
+      return;
+    }
+
+    setDeleting(true);
+    try {
+      // 先取得該員工所有請假申請的 ID
+      const { data: leaveReqs } = await supabase
+        .from('leave_requests')
+        .select('id')
+        .eq('employee_id', deletingEmp.id);
+
+      const reqIds = (leaveReqs || []).map((r: Record<string, unknown>) => String(r.id));
+
+      if (reqIds.length > 0) {
+        // 清理請假子表（透過 request_id 關聯）
+        await supabase.from('leave_day_approvals').delete().in('request_id', reqIds);
+        await supabase.from('leave_day_cancellations').delete().in('request_id', reqIds);
+      }
+
+      // 清理其他關聯資料
+      await supabase.from('leave_requests').delete().eq('employee_id', deletingEmp.id);
+      await supabase.from('leave_cancel_counts').delete().eq('employee_id', deletingEmp.id);
+      await supabase.from('shift_customizations').delete().eq('employee_id', deletingEmp.id);
+
+      // 刪除員工本人
+      const { error } = await supabase
+        .from('employees')
+        .delete()
+        .eq('id', deletingEmp.id);
+
+      if (error) {
+        showToast('刪除失敗：' + error.message);
+        console.error('刪除員工失敗:', error);
+        setDeleting(false);
+        return;
+      }
+
+      setEmployees((prev) => prev.filter((e) => e.id !== deletingEmp.id));
+      setDeletingEmp(null);
+      showToast('已刪除 ' + deletingEmp.name);
+    } catch (err) {
+      console.error('刪除員工異常:', err);
+      showToast('刪除異常');
+    } finally {
+      setDeleting(false);
+    }
   }
 
   function roleLabel(role: string) {
@@ -330,6 +397,15 @@ export default function AdminEmployeesPage() {
                     >
                       <i className="ri-pencil-line text-sm" />
                     </button>
+                    {emp.role !== 'manager' && (
+                      <button
+                        onClick={() => openDeleteConfirm(emp)}
+                        className="w-8 h-8 flex items-center justify-center rounded-lg text-stone-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                        title="刪除"
+                      >
+                        <i className="ri-delete-bin-line text-sm" />
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -649,6 +725,65 @@ export default function AdminEmployeesPage() {
                 className="flex-1 border border-stone-200 text-stone-600 text-sm font-medium py-2.5 rounded-xl hover:bg-stone-50 transition-colors"
               >
                 關閉
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===== 刪除確認彈窗 ===== */}
+      {deletingEmp && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-end sm:items-center justify-center p-4">
+          <div className="bg-white rounded-2xl w-full max-w-sm overflow-hidden animate-[slideUp_0.2s_ease-out]">
+            <div className="px-5 py-4 border-b border-stone-100 flex items-center justify-between">
+              <h2 className="text-base font-bold text-stone-800">確認刪除</h2>
+              <button
+                onClick={cancelDelete}
+                disabled={deleting}
+                className="w-8 h-8 flex items-center justify-center text-stone-400 hover:text-stone-600"
+              >
+                <i className="ri-close-line text-xl" />
+              </button>
+            </div>
+
+            <div className="px-5 py-5 text-center space-y-3">
+              <div className="w-14 h-14 bg-red-50 rounded-full flex items-center justify-center mx-auto">
+                <i className="ri-error-warning-line text-3xl text-red-500" />
+              </div>
+              <div>
+                <p className="text-sm font-medium text-stone-800">
+                  確定要刪除 <span className="text-red-600 font-bold">{deletingEmp.name}</span> 嗎？
+                </p>
+                <p className="text-xs text-stone-400 mt-1.5">
+                  此操作將一併清除該員工的所有請假記錄、排班資料等相關數據，且無法復原。
+                </p>
+              </div>
+            </div>
+
+            <div className="px-5 py-4 border-t border-stone-100 flex gap-3">
+              <button
+                onClick={cancelDelete}
+                disabled={deleting}
+                className="flex-1 py-2.5 rounded-xl border border-stone-200 text-stone-600 text-sm font-medium hover:bg-stone-50 transition-colors whitespace-nowrap"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleDelete}
+                disabled={deleting}
+                className="flex-[2] bg-red-600 hover:bg-red-700 disabled:bg-red-300 text-white text-sm font-medium py-2.5 rounded-xl transition-colors flex items-center justify-center gap-2 whitespace-nowrap"
+              >
+                {deleting ? (
+                  <>
+                    <i className="ri-loader-4-line animate-spin" />
+                    刪除中...
+                  </>
+                ) : (
+                  <>
+                    <i className="ri-delete-bin-line" />
+                    確認刪除
+                  </>
+                )}
               </button>
             </div>
           </div>
