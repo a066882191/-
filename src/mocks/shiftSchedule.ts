@@ -66,6 +66,10 @@ export interface ShiftCodeInfo {
   bgColor: string;
   icon: string;
   hideStartTime?: boolean;
+  controlLocation?: string;
+  controlTime?: string;
+  controlLocation2?: string;
+  controlTime2?: string;
 }
 
 /** 所有可用班次代碼映射 */
@@ -223,12 +227,80 @@ export const shiftCodeMap: Record<string, ShiftCodeInfo> = {
   '755': { code: '755', label: '755班', timeRange: '05:19 – 13:19', startTime: '05:19', endTime: '13:19', type: 'day', color: 'text-teal-700', bgColor: 'bg-teal-50 border-teal-200', icon: 'ri-sun-line' },
   '761A': { code: '761A', label: '761A班', timeRange: '09:32 – 17:32', startTime: '09:32', endTime: '17:32', type: 'day', color: 'text-teal-700', bgColor: 'bg-teal-50 border-teal-200', icon: 'ri-sun-line' },
   '762B': { code: '762B', label: '762B班', timeRange: '06:54 – 14:54', startTime: '06:54', endTime: '14:54', type: 'day', color: 'text-teal-700', bgColor: 'bg-teal-50 border-teal-200', icon: 'ri-sun-line' },
+  '756': { code: '756', label: '756班', timeRange: '06:00 – 14:00', startTime: '06:00', endTime: '14:00', type: 'day', color: 'text-teal-700', bgColor: 'bg-teal-50 border-teal-200', icon: 'ri-sun-line' },
+  '757': { code: '757', label: '757班', timeRange: '14:00 – 22:00', startTime: '14:00', endTime: '22:00', type: 'night', color: 'text-indigo-700', bgColor: 'bg-indigo-50 border-indigo-200', icon: 'ri-moon-line' },
   'AG': { code: 'AG', label: '阿給', timeRange: '07:00 – 15:00', startTime: '07:00', endTime: '15:00', type: 'day', color: 'text-amber-700', bgColor: 'bg-amber-50 border-amber-200', icon: 'ri-run-line', hideStartTime: true },
   // === 休假 ===
   'OFF': { code: 'OFF', label: '休假', timeRange: '-', startTime: '-', endTime: '-', type: 'rest', color: 'text-stone-500', bgColor: 'bg-stone-50 border-stone-200', icon: 'ri-hotel-bed-line' },
 };
 
-/** 完整班序循環（點擊卡片時依此順序自動切換） */
+// ===== 管理員自訂班次時間覆寫 =====
+export interface ShiftTimeOverride {
+  shift_code: string;
+  start_time: string;
+  end_time: string;
+}
+
+let _shiftTimeOverrides: Record<string, ShiftTimeOverride> = {};
+
+/** 設定管理員自訂的班次時間覆寫（由 useShiftOverrides hook 呼叫） */
+export function setShiftTimeOverrides(overrides: ShiftTimeOverride[]): void {
+  _shiftTimeOverrides = {};
+  overrides.forEach((o) => {
+    _shiftTimeOverrides[o.shift_code] = o;
+  });
+}
+
+// ===== 管理員自訂班次詳細資訊（管制地點、管制時間） =====
+export interface ShiftCodeDetail {
+  shift_code: string;
+  control_location: string;
+  control_time: string;
+  control_location_2?: string;
+  control_time_2?: string;
+  label?: string;
+}
+
+let _shiftCodeDetails: Record<string, ShiftCodeDetail> = {};
+
+/** 設定管理員自訂的班次詳細資訊 */
+export function setShiftCodeDetails(details: ShiftCodeDetail[]): void {
+  _shiftCodeDetails = {};
+  details.forEach((d) => {
+    _shiftCodeDetails[d.shift_code] = d;
+  });
+}
+
+/** 取得有效班次資訊（合併覆寫資料） */
+export function getShiftByCode(code: string | undefined): ShiftCodeInfo | null {
+  if (!code) return null;
+  const base = shiftCodeMap[code];
+  if (!base) return null;
+  const override = _shiftTimeOverrides[code];
+  const detail = _shiftCodeDetails[code];
+  let result = { ...base };
+  if (override) {
+    result = {
+      ...result,
+      startTime: override.start_time,
+      endTime: override.end_time,
+      timeRange: `${override.start_time} – ${override.end_time}`,
+    };
+  }
+  if (detail) {
+    result = {
+      ...result,
+      label: detail.label || result.label,
+      controlLocation: detail.control_location || result.controlLocation,
+      controlTime: detail.control_time || result.controlTime,
+      controlLocation2: detail.control_location_2,
+      controlTime2: detail.control_time_2,
+    };
+  }
+  return result;
+}
+
+/** 完整班序循環（點擊卡片時依此順序自動切換 - 預設值） */
 export const USER_CYCLE_ORDER = [
   'OFF',   // 例假
   '718',   // 18:56
@@ -314,10 +386,43 @@ export function getNextCycleShiftCode(currentCode: string | undefined): string {
   return USER_CYCLE_ORDER[(idx + 1) % USER_CYCLE_ORDER.length];
 }
 
-/** 根據班次代碼取得班次資訊 */
-export function getShiftByCode(code: string | undefined): ShiftCodeInfo | null {
-  if (!code) return null;
-  return shiftCodeMap[code] || null;
+// ===== 管理員自訂班次循環排序 =====
+let _customCycleOrder: string[] = [...USER_CYCLE_ORDER];
+let _cycleOffset: number = 0;
+
+/** 取得目前生效的循環排序（管理員自訂優先，否則用預設） */
+export function getCurrentCycleOrder(): string[] {
+  return _customCycleOrder;
+}
+
+/** 設定管理員自訂的循環排序 */
+export function setCustomCycleOrder(order: string[]): void {
+  _customCycleOrder = [...order];
+}
+
+/** 取得循環偏移量（用於日期對齊） */
+export function getCycleOffset(): number {
+  return _cycleOffset;
+}
+
+/** 設定循環偏移量 */
+export function setCycleOffset(offset: number): void {
+  _cycleOffset = offset;
+}
+
+/** 恢復預設循環排序 */
+export function resetCycleOrder(): void {
+  _customCycleOrder = [...USER_CYCLE_ORDER];
+  _cycleOffset = 0;
+}
+
+/** 取得循環中的下一個班次代碼（使用自訂排序） */
+export function getNextCycleShiftCodeCustom(currentCode: string | undefined): string {
+  const code = currentCode || 'OFF';
+  const order = _customCycleOrder;
+  const idx = order.indexOf(code);
+  if (idx === -1) return order[0];
+  return order[(idx + 1) % order.length];
 }
 
 /** 根據 ShiftType 取得預設班次代碼 */
@@ -366,7 +471,7 @@ export function getTodayStr(): string {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 }
 
-/** 取得未來 7 天的排班資訊 */
+/** 取得未來 7 天的排班資訊（支援管理員循環排序） */
 const weekDayNames = ['日', '一', '二', '三', '四', '五', '六'];
 
 export function getWeekShifts(
@@ -381,12 +486,29 @@ export function getWeekShifts(
     const d = new Date(fromDate);
     d.setDate(d.getDate() + i);
     const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+    // 優先使用管理員循環排序
+    const codeInfo = getShiftForDateWithCycle(group, dateStr);
+    const shift: ShiftInfo = codeInfo
+      ? {
+          type: codeInfo.type,
+          label: codeInfo.label,
+          timeRange: codeInfo.timeRange,
+          startTime: codeInfo.startTime,
+          endTime: codeInfo.endTime,
+          color: codeInfo.color,
+          bgColor: codeInfo.bgColor,
+          icon: codeInfo.icon,
+          hideStartTime: codeInfo.hideStartTime,
+        }
+      : getShiftForDate(group, dateStr)!;
+
     items.push({
       dateStr,
       dayOfWeek: weekDayNames[d.getDay()],
       dayNum: d.getDate(),
       month: d.getMonth() + 1,
-      shift: getShiftForDate(group, dateStr)!,
+      shift,
       isToday: dateStr === todayStr,
     });
   }
@@ -456,6 +578,7 @@ export function resetUserCustomShifts(userId: string): void {
   } catch { /* ignore */ }
 }
 
+/** 取得用戶未來 7 天的排班（支援用戶自定義 + 管理員循環排序） */
 export function getUserWeekShifts(
   userId: string,
   group: 'A' | 'B' | null,
@@ -466,14 +589,46 @@ export function getUserWeekShifts(
   const items: WeekShiftItem[] = [];
   const todayStr = getTodayStr();
 
+  // 自動清理過期的自訂班次（早於今天的資料）
+  try {
+    const raw = localStorage.getItem(USER_SHIFT_STORAGE_KEY);
+    if (raw) {
+      const all = JSON.parse(raw) as Record<string, Record<string, string>>;
+      if (all[userId]) {
+        let changed = false;
+        Object.keys(all[userId]).forEach((dateKey) => {
+          if (dateKey < todayStr) {
+            delete all[userId][dateKey];
+            changed = true;
+          }
+        });
+        if (changed) {
+          localStorage.setItem(USER_SHIFT_STORAGE_KEY, JSON.stringify(all));
+          // 更新本次 customCodes（已清理過期的）
+          Object.keys(customCodes).forEach((k) => {
+            if (k < todayStr) delete customCodes[k];
+          });
+        }
+      }
+    }
+  } catch { /* ignore */ }
+
   for (let i = 0; i < 8; i++) {
     const d = new Date(fromDate);
     d.setDate(d.getDate() + i);
     const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     const customCode = customCodes[dateStr];
+
+    // 取循環預設代碼
+    const cycleCode = getCycleShiftCodeForDate(group, dateStr);
+
+    // 如果自訂代碼和循環預設一樣，視為無自訂（不使用 customCode）
+    const effectiveCustomCode = (customCode && customCode !== cycleCode) ? customCode : undefined;
     let shift: ShiftInfo;
-    if (customCode) {
-      const codeInfo = getShiftByCode(customCode);
+
+    if (effectiveCustomCode) {
+      // 用戶自定義班次
+      const codeInfo = getShiftByCode(effectiveCustomCode);
       shift = codeInfo
         ? {
             type: codeInfo.type,
@@ -488,8 +643,23 @@ export function getUserWeekShifts(
           }
         : getShiftForDate(group, dateStr)!;
     } else {
-      shift = getShiftForDate(group, dateStr)!;
+      // 預設：使用管理員循環排序
+      const codeInfo = getShiftForDateWithCycle(group, dateStr);
+      shift = codeInfo
+        ? {
+            type: codeInfo.type,
+            label: codeInfo.label,
+            timeRange: codeInfo.timeRange,
+            startTime: codeInfo.startTime,
+            endTime: codeInfo.endTime,
+            color: codeInfo.color,
+            bgColor: codeInfo.bgColor,
+            icon: codeInfo.icon,
+            hideStartTime: codeInfo.hideStartTime,
+          }
+        : getShiftForDate(group, dateStr)!;
     }
+
     items.push({
       dateStr,
       dayOfWeek: weekDayNames[d.getDay()],
@@ -513,4 +683,64 @@ export function hasUserCustomShift(userId: string, dateStr: string): boolean {
 export function getUserCustomShiftCode(userId: string, dateStr: string): string | undefined {
   const custom = getUserCustomShiftCodes(userId);
   return custom[dateStr];
+}
+
+/** 根據日期與組別從管理員設定的循環排序取得班次代碼 */
+export function getCycleShiftCodeForDate(group: 'A' | 'B', dateStr: string): string {
+  const cycleOrder = getCurrentCycleOrder();
+  if (cycleOrder.length === 0) return 'OFF';
+
+  const d = new Date(dateStr + 'T00:00:00');
+  const base = new Date('2026-01-01T00:00:00').getTime();
+  const diffMs = d.getTime() - base;
+  const dayIndex = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+  // A 組從第 0 天開始，B 組錯開 3 天（與原本 6 天循環一致）
+  const groupOffset = group === 'A' ? 0 : 3;
+  // 管理員可透過儲存循環排序時自動計算偏移，讓循環對齊實際班表
+  const adminOffset = getCycleOffset();
+  const totalOffset = groupOffset + adminOffset;
+  const cycleIdx = ((dayIndex + totalOffset) % cycleOrder.length + cycleOrder.length) % cycleOrder.length;
+
+  return cycleOrder[cycleIdx];
+}
+
+/** 使用循環排序取得某天的班次資訊（管理員設定優先） */
+export function getShiftForDateWithCycle(
+  group: 'A' | 'B' | null,
+  dateStr: string,
+): ShiftCodeInfo | null {
+  if (!group) return null;
+
+  // 先嘗試從管理員循環排序取得代碼
+  const cycleCode = getCycleShiftCodeForDate(group, dateStr);
+  const codeInfo = getShiftByCode(cycleCode);
+  if (codeInfo) return codeInfo;
+
+  // fallback：回歸原本的 6 天類型循環 + 預設代碼
+  const baseShift = getShiftForDate(group, dateStr);
+  if (!baseShift) return null;
+  const defaultCode = baseShift.type === 'day' ? '701' : baseShift.type === 'night' ? '732' : 'OFF';
+  return getShiftByCode(defaultCode);
+}
+
+/** 將自訂班次合併進 shiftCodeMap（從 DB 載入後呼叫） */
+export function registerCustomShiftCodes(
+  codes: Array<{ code: string; label: string; type: string; start_time: string; end_time: string }>,
+): void {
+  codes.forEach((c) => {
+    const shiftType: ShiftType = c.type === 'night' ? 'night' : c.type === 'rest' ? 'rest' : 'day';
+    const isNight = shiftType === 'night';
+    shiftCodeMap[c.code] = {
+      code: c.code,
+      label: c.label,
+      timeRange: `${c.start_time} – ${c.end_time}`,
+      startTime: c.start_time,
+      endTime: c.end_time,
+      type: shiftType,
+      color: isNight ? 'text-indigo-700' : 'text-teal-700',
+      bgColor: isNight ? 'bg-indigo-50 border-indigo-200' : 'bg-teal-50 border-teal-200',
+      icon: isNight ? 'ri-moon-line' : 'ri-sun-line',
+    };
+  });
 }

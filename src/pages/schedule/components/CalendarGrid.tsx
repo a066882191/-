@@ -27,7 +27,7 @@ const weekDays = ['日', '一', '二', '三', '四', '五', '六'];
 
 function getLeavesForDate(dateStr: string, requests: LeaveRequest[]): DayLeaveInfo[] {
   return requests
-    .filter((req) => dateStr === req.start_date)
+    .filter((req) => dateStr >= req.start_date && dateStr <= req.end_date)
     .map((req) => {
       const emp = getAllEmployees().find((e) => e.id === req.employee_id);
       const lt = leaveTypes.find((t) => t.id === req.leave_type);

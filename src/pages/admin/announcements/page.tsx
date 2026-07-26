@@ -423,7 +423,7 @@ export default function AdminAnnouncementsPage() {
               {items.map((item) => (
                 <div key={item.id} className="bg-white rounded-xl border border-stone-100 overflow-hidden">
                   {item.imageUrl ? (
-                    <div className="w-full h-36 overflow-hidden">
+                    <div className="w-full h-36 md:h-56 overflow-hidden">
                       <img
                         src={convertGoogleDriveUrl(item.imageUrl)}
                         alt={item.title}

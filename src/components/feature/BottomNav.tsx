@@ -15,7 +15,6 @@ export function BottomNav() {
     { path: '/shift', label: '當月班表', icon: 'ri-table-line', iconActive: 'ri-table-fill' },
     { path: '/schedule', label: t('schedule'), icon: 'ri-calendar-line', iconActive: 'ri-calendar-fill' },
     { path: '/leave/apply', label: t('leave_apply'), icon: 'ri-add-circle-line', iconActive: 'ri-add-circle-fill' },
-    { path: '/leave/records', label: t('leave_records'), icon: 'ri-file-list-line', iconActive: 'ri-file-list-fill' },
     ...(isManager ? [{ path: '/admin/approval', label: t('approval'), icon: 'ri-shield-check-line', iconActive: 'ri-shield-check-fill' }] : []),
     { path: '/profile', label: t('profile'), icon: 'ri-user-line', iconActive: 'ri-user-fill' },
   ];

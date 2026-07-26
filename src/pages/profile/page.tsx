@@ -1,7 +1,17 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from '@/hooks/useAuth';
+import {
+  getShiftForDate,
+  getTomorrowStr,
+  getTodayStr,
+  getUserCustomShiftCode,
+  getShiftByCode,
+  getShiftForDateWithCycle,
+} from '@/mocks/shiftSchedule';
+import { useShiftCodeDetails } from '@/hooks/useShiftCodeDetails';
+import { useShiftCycleOrder } from '@/hooks/useShiftCycleOrder';
 
 export default function ProfilePage() {
   const { t } = useTranslation();
@@ -9,6 +19,65 @@ export default function ProfilePage() {
   const { user, logout, updateUserAnnualLeave } = useAuth();
   const [isEditingLeave, setIsEditingLeave] = useState(false);
   const [leaveInput, setLeaveInput] = useState(user?.annual_leave_days || 0);
+  useShiftCodeDetails();
+  useShiftCycleOrder();
+
+  // 今日/明日班表管制資訊
+  const userGroup = (user?.group as 'A' | 'B' | null) || (user ? 'A' : null);
+  const todayStr = getTodayStr();
+  const tomorrowStr = getTomorrowStr();
+
+  const getShiftControlInfo = (dateStr: string) => {
+    if (!userGroup) return null;
+    const customCode = getUserCustomShiftCode(user?.id || '', dateStr);
+    if (customCode) {
+      const codeInfo = getShiftByCode(customCode);
+      if (codeInfo) {
+        return {
+          type: codeInfo.type,
+          label: codeInfo.label,
+          startTime: codeInfo.startTime,
+          hideStartTime: codeInfo.hideStartTime,
+          controlLocation: codeInfo.controlLocation,
+          controlTime: codeInfo.controlTime,
+          controlLocation2: codeInfo.controlLocation2,
+          controlTime2: codeInfo.controlTime2,
+        };
+      }
+    }
+    // 優先使用管理員循環排序
+    const cycleInfo = getShiftForDateWithCycle(userGroup, dateStr);
+    if (cycleInfo) {
+      return {
+        type: cycleInfo.type,
+        label: cycleInfo.label,
+        startTime: cycleInfo.startTime,
+        hideStartTime: cycleInfo.hideStartTime,
+        controlLocation: cycleInfo.controlLocation,
+        controlTime: cycleInfo.controlTime,
+        controlLocation2: cycleInfo.controlLocation2,
+        controlTime2: cycleInfo.controlTime2,
+      };
+    }
+    // fallback：原本的 6 天循環
+    const shift = getShiftForDate(userGroup, dateStr);
+    if (!shift) return null;
+    const defaultCode = shift.type === 'day' ? '701' : shift.type === 'night' ? '732' : 'OFF';
+    const detail = getShiftByCode(defaultCode);
+    return {
+      type: shift.type,
+      label: shift.label,
+      startTime: shift.startTime,
+      hideStartTime: shift.hideStartTime,
+      controlLocation: detail?.controlLocation,
+      controlTime: detail?.controlTime,
+      controlLocation2: detail?.controlLocation2,
+      controlTime2: detail?.controlTime2,
+    };
+  };
+
+  const todayInfo = getShiftControlInfo(todayStr);
+  const tomorrowInfo = getShiftControlInfo(tomorrowStr);
 
   const handleLogout = () => {
     logout();
@@ -54,6 +123,97 @@ export default function ProfilePage() {
             </div>
           </div>
         </div>
+
+        {/* 管制資訊 */}
+        {userGroup && (
+          <div className="space-y-3">
+            {/* 今日管制資訊 */}
+            {todayInfo && todayInfo.type !== 'rest' && (
+              <div className="bg-white rounded-xl border border-stone-100 overflow-hidden">
+                <div className="flex items-center gap-2 px-4 py-3 border-b border-stone-50 bg-stone-50/50">
+                  <i className="ri-calendar-check-line text-emerald-500 text-sm" />
+                  <span className="text-xs font-semibold text-stone-700">今日管制資訊</span>
+                  <span className="text-[10px] text-stone-400">{todayInfo.label}</span>
+                </div>
+                <div className="p-4 space-y-2.5">
+                  {/* 第一組 */}
+                  <div className="flex items-center gap-4">
+                    <div className="flex items-center gap-1.5 min-w-[120px]">
+                      <span className="text-[10px] text-stone-400 w-10">地點一</span>
+                      <span className="text-xs text-rose-600 font-medium">
+                        {todayInfo.controlLocation && todayInfo.controlLocation !== '-' ? todayInfo.controlLocation : '—'}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] text-stone-400 w-10">時間一</span>
+                      <span className="text-xs text-amber-600 font-medium">
+                        {todayInfo.controlTime && todayInfo.controlTime !== '-' ? todayInfo.controlTime : '—'}
+                      </span>
+                    </div>
+                  </div>
+                  {/* 第二組 */}
+                  <div className="flex items-center gap-4">
+                    <div className="flex items-center gap-1.5 min-w-[120px]">
+                      <span className="text-[10px] text-stone-400 w-10">地點二</span>
+                      <span className="text-xs text-rose-600 font-medium">
+                        {todayInfo.controlLocation2 && todayInfo.controlLocation2 !== '-' ? todayInfo.controlLocation2 : '—'}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] text-stone-400 w-10">時間二</span>
+                      <span className="text-xs text-amber-600 font-medium">
+                        {todayInfo.controlTime2 && todayInfo.controlTime2 !== '-' ? todayInfo.controlTime2 : '—'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* 明日管制資訊 */}
+            {tomorrowInfo && tomorrowInfo.type !== 'rest' && (
+              <div className="bg-white rounded-xl border border-stone-100 overflow-hidden">
+                <div className="flex items-center gap-2 px-4 py-3 border-b border-stone-50 bg-stone-50/50">
+                  <i className="ri-calendar-todo-line text-sky-500 text-sm" />
+                  <span className="text-xs font-semibold text-stone-700">明日管制資訊</span>
+                  <span className="text-[10px] text-stone-400">{tomorrowInfo.label}</span>
+                </div>
+                <div className="p-4 space-y-2.5">
+                  {/* 第一組 */}
+                  <div className="flex items-center gap-4">
+                    <div className="flex items-center gap-1.5 min-w-[120px]">
+                      <span className="text-[10px] text-stone-400 w-10">地點一</span>
+                      <span className="text-xs text-rose-600 font-medium">
+                        {tomorrowInfo.controlLocation && tomorrowInfo.controlLocation !== '-' ? tomorrowInfo.controlLocation : '—'}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] text-stone-400 w-10">時間一</span>
+                      <span className="text-xs text-amber-600 font-medium">
+                        {tomorrowInfo.controlTime && tomorrowInfo.controlTime !== '-' ? tomorrowInfo.controlTime : '—'}
+                      </span>
+                    </div>
+                  </div>
+                  {/* 第二組 */}
+                  <div className="flex items-center gap-4">
+                    <div className="flex items-center gap-1.5 min-w-[120px]">
+                      <span className="text-[10px] text-stone-400 w-10">地點二</span>
+                      <span className="text-xs text-rose-600 font-medium">
+                        {tomorrowInfo.controlLocation2 && tomorrowInfo.controlLocation2 !== '-' ? tomorrowInfo.controlLocation2 : '—'}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] text-stone-400 w-10">時間二</span>
+                      <span className="text-xs text-amber-600 font-medium">
+                        {tomorrowInfo.controlTime2 && tomorrowInfo.controlTime2 !== '-' ? tomorrowInfo.controlTime2 : '—'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Stats */}
         <div className="grid grid-cols-2 gap-3">

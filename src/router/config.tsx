@@ -6,7 +6,7 @@ import ForgotPassword from "../pages/forgot-password/page";
 import ResetPassword from "../pages/reset-password/page";
 import Dashboard from "../pages/dashboard/page";
 import LeaveApply from "../pages/leave/apply/page";
-import LeaveRecords from "../pages/leave/records/page";
+import SchedulePage from "../pages/schedule/page";
 import AdminApproval from "../pages/admin/approval/page";
 import AdminAnnouncements from "../pages/admin/announcements/page";
 import Schedule from "../pages/schedule/page";
@@ -42,7 +42,7 @@ const routes: RouteObject[] = [
   },
   {
     path: "/leave/records",
-    element: <LeaveRecords />,
+    element: <SchedulePage />,
   },
   {
     path: "/admin/approval",

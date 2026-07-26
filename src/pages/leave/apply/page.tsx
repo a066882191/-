@@ -21,17 +21,90 @@ export default function LeaveApplyPage() {
   const [errorMsg, setErrorMsg] = useState('');
   const [submitError, setSubmitError] = useState('');
 
-  // ... existing code ...
-  const minDate = (() => {
-    const d = new Date();
-    d.setDate(d.getDate() + 7);
-    return d.toISOString().split('T')[0];
-  })();
-  const maxDate = (() => {
-    const d = new Date();
-    d.setDate(d.getDate() + 90);
-    return d.toISOString().split('T')[0];
-  })();
+  // 季度申請窗口：1~3月申請1~4月、4~7月申請4~8月、8~11月申請8~12月、12月申請12月~隔年4月
+  const APPLICATION_WINDOWS: Record<number, { min: Date; max: Date; label: string }> = {
+    1: {
+      min: new Date(new Date().getFullYear(), 0, 1),
+      max: new Date(new Date().getFullYear(), 4, 0),
+      label: '1/1 ~ 4/30',
+    },
+    2: {
+      min: new Date(new Date().getFullYear(), 0, 1),
+      max: new Date(new Date().getFullYear(), 4, 0),
+      label: '1/1 ~ 4/30',
+    },
+    3: {
+      min: new Date(new Date().getFullYear(), 0, 1),
+      max: new Date(new Date().getFullYear(), 4, 0),
+      label: '1/1 ~ 4/30',
+    },
+    4: {
+      min: new Date(new Date().getFullYear(), 3, 1),
+      max: new Date(new Date().getFullYear(), 8, 0),
+      label: '4/1 ~ 8/31',
+    },
+    5: {
+      min: new Date(new Date().getFullYear(), 3, 1),
+      max: new Date(new Date().getFullYear(), 8, 0),
+      label: '4/1 ~ 8/31',
+    },
+    6: {
+      min: new Date(new Date().getFullYear(), 3, 1),
+      max: new Date(new Date().getFullYear(), 8, 0),
+      label: '4/1 ~ 8/31',
+    },
+    7: {
+      min: new Date(new Date().getFullYear(), 3, 1),
+      max: new Date(new Date().getFullYear(), 8, 0),
+      label: '4/1 ~ 8/31',
+    },
+    8: {
+      min: new Date(new Date().getFullYear(), 7, 1),
+      max: new Date(new Date().getFullYear(), 12, 0),
+      label: '8/1 ~ 12/31',
+    },
+    9: {
+      min: new Date(new Date().getFullYear(), 7, 1),
+      max: new Date(new Date().getFullYear(), 12, 0),
+      label: '8/1 ~ 12/31',
+    },
+    10: {
+      min: new Date(new Date().getFullYear(), 7, 1),
+      max: new Date(new Date().getFullYear(), 12, 0),
+      label: '8/1 ~ 12/31',
+    },
+    11: {
+      min: new Date(new Date().getFullYear(), 7, 1),
+      max: new Date(new Date().getFullYear(), 12, 0),
+      label: '8/1 ~ 12/31',
+    },
+    12: {
+      min: new Date(new Date().getFullYear(), 11, 1),
+      max: new Date(new Date().getFullYear() + 1, 4, 0),
+      label: `12/1 ~ ${new Date().getFullYear() + 1}/4/30`,
+    },
+  };
+
+  const currentMonth = new Date().getMonth() + 1; // 1-indexed
+  const currentWindow = APPLICATION_WINDOWS[currentMonth] ?? APPLICATION_WINDOWS[1];
+
+  // 避免時區偏移：用本地時間組 YYYY-MM-DD 字串
+  function toLocalDateString(date: Date) {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+
+  const minDate = toLocalDateString(currentWindow.min);
+  const maxDate = toLocalDateString(currentWindow.max);
+  const windowLabel = currentWindow.label;
+
+  // 7天緩衝：開始日期必須距離今天至少7天（今天算第1天，最早可選 今天+7）
+  const today = new Date();
+  const sevenDaysLater = new Date(today.getTime() + 7 * 24 * 60 * 60 * 1000);
+  const minAdvanceDate = toLocalDateString(sevenDaysLater);
+  const effectiveMinDate = minDate > minAdvanceDate ? minDate : minAdvanceDate;
 
   // 計算請假天數（自然日，含首尾）
   const daysCount = (() => {
@@ -44,9 +117,9 @@ export default function LeaveApplyPage() {
 
   const isDateValid = (() => {
     if (!startDate) return true;
-    if (startDate < minDate || startDate > maxDate) return false;
+    if (startDate < effectiveMinDate || startDate > maxDate) return false;
     if (endDate) {
-      if (endDate < minDate || endDate > maxDate) return false;
+      if (endDate < effectiveMinDate || endDate > maxDate) return false;
       if (endDate < startDate) return false;
     }
     return true;
@@ -56,10 +129,18 @@ export default function LeaveApplyPage() {
     e.preventDefault();
     setErrorMsg('');
     setSubmitError('');
-    if (!user || !leaveType || !startDate || !endDate || !workShift) return;
+    if (!user || !leaveType || !startDate || !endDate) return;
 
+    if (startDate < effectiveMinDate) {
+      setErrorMsg(`請假須提前 7 天申請，最早可選 ${effectiveMinDate}，請重新選擇`);
+      return;
+    }
     if (startDate < minDate || startDate > maxDate) {
       setErrorMsg(`開始日期僅限 ${minDate} 至 ${maxDate}，請重新選擇`);
+      return;
+    }
+    if (endDate < effectiveMinDate) {
+      setErrorMsg(`結束日期須提前 7 天申請，最早可選 ${effectiveMinDate}，請重新選擇`);
       return;
     }
     if (endDate < minDate || endDate > maxDate) {
@@ -155,7 +236,7 @@ export default function LeaveApplyPage() {
                 <input
                   type="date"
                   value={startDate}
-                  min={minDate}
+                  min={effectiveMinDate}
                   max={maxDate}
                   onChange={(e) => {
                     const val = e.target.value;
@@ -178,7 +259,7 @@ export default function LeaveApplyPage() {
                 <input
                   type="date"
                   value={endDate}
-                  min={minDate}
+                  min={startDate || effectiveMinDate}
                   max={maxDate}
                   onChange={(e) => {
                     const val = e.target.value;
@@ -193,14 +274,14 @@ export default function LeaveApplyPage() {
               </div>
             </div>
             <p className="text-xs text-stone-400 -mt-3">
-              請假日期範圍：{minDate} 至 {maxDate}
+              請假日期範圍：{windowLabel}（須提前 7 天申請）
             </p>
 
             {/* 工作班 */}
             <div>
               <label className="block text-sm font-medium text-stone-700 mb-1.5">
-                工作班別 <span className="text-red-500">*</span>
-                <span className="text-xs text-stone-400 font-normal ml-1">（跨天請逐日填寫）</span>
+                工作班別
+                <span className="text-xs text-stone-400 font-normal ml-1">（選填，跨天請逐日填寫）</span>
               </label>
               <textarea
                 value={workShift}
@@ -209,7 +290,6 @@ export default function LeaveApplyPage() {
                 rows={3}
                 maxLength={200}
                 className="w-full px-3 py-2.5 rounded-xl border border-stone-200 text-stone-800 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 resize-none"
-                required
               />
               <p className="text-xs text-stone-400 mt-1 text-right">{workShift.length}/200</p>
             </div>
@@ -276,7 +356,7 @@ export default function LeaveApplyPage() {
               </button>
               <button
                 type="submit"
-                disabled={submitting || !leaveType || !startDate || !endDate || !workShift || !isDateValid}
+                disabled={submitting || !leaveType || !startDate || !endDate || !isDateValid}
                 className="flex-[2] bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-300 text-white font-medium py-3 rounded-xl transition-colors text-sm flex items-center justify-center gap-2"
               >
                 {submitting ? (

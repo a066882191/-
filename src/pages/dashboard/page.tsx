@@ -4,7 +4,8 @@ import { useTranslation } from 'react-i18next';
 import { useAuth } from '@/hooks/useAuth';
 import { leaveTypes } from '@/mocks/leaveTypes';
 import { getLeaveRequestsByEmployee } from '@/stores/leaveStore';
-import { useLeaveStore } from '@/stores/leaveStore';
+import { useLeaveStore, getRequestDayStatusMap } from '@/stores/leaveStore';
+import type { LeaveRequest } from '@/stores/leaveStore';
 import {
   getShiftForDate,
   getTomorrowStr,
@@ -12,20 +13,30 @@ import {
   getUserWeekShifts,
   getUserCustomShiftCode,
   getShiftByCode,
+  getShiftForDateWithCycle,
 } from '@/mocks/shiftSchedule';
 import WeekShiftPreview from './components/WeekShiftPreview';
-import { useAnnouncements, convertGoogleDriveUrl } from '@/mocks/announcements';
+import { useAnnouncements, convertGoogleDriveUrl, isGoogleDriveUrl, getGoogleDrivePreviewUrl } from '@/mocks/announcements';
 import ImageLightbox from '@/pages/shift/components/ImageLightbox';
+import DrivePreviewModal from '@/components/feature/DrivePreviewModal';
+import { useShiftOverrides } from '@/hooks/useShiftOverrides';
+import { useShiftCycleOrder } from '@/hooks/useShiftCycleOrder';
+import { useShiftCodeDetails } from '@/hooks/useShiftCodeDetails';
 
 export default function DashboardPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { user } = useAuth();
+  useShiftOverrides();
+  const { cycleVersion } = useShiftCycleOrder();
+  useShiftCodeDetails();
   useLeaveStore(); // subscribe to store changes
 
   const announcements = useAnnouncements();
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
   const [lightboxTitle, setLightboxTitle] = useState('');
+  const [drivePreviewUrl, setDrivePreviewUrl] = useState<string | null>(null);
+  const [drivePreviewTitle, setDrivePreviewTitle] = useState('');
 
   const myRequests = getLeaveRequestsByEmployee(user?.id || '');
   const pendingCount = myRequests.filter((r) => r.status === 'pending').length;
@@ -48,7 +59,7 @@ export default function DashboardPage() {
   const todayStr = getTodayStr();
   const userGroup = (user?.group as 'A' | 'B' | null) || (user ? 'A' : null);
 
-  /** 取得某天的班次（優先讀取用戶自定義） */
+  /** 取得某天的班次（優先讀取用戶自定義，其次管理員循環排序） */
   const getTodayOrTomorrowShift = (dateStr: string) => {
     if (!userGroup) return null;
     // 優先讀取用戶自定義班次
@@ -66,24 +77,70 @@ export default function DashboardPage() {
           bgColor: codeInfo.bgColor,
           icon: codeInfo.icon,
           hideStartTime: codeInfo.hideStartTime,
+          code: customCode,
+          controlLocation: codeInfo.controlLocation,
+          controlTime: codeInfo.controlTime,
+          controlLocation2: codeInfo.controlLocation2,
+          controlTime2: codeInfo.controlTime2,
         };
       }
     }
-    // 無自定義則用預設輪班
-    return getShiftForDate(userGroup, dateStr);
+    // 無自定義則用管理員循環排序
+    const cycleInfo = getShiftForDateWithCycle(userGroup, dateStr);
+    if (cycleInfo) {
+      return {
+        type: cycleInfo.type,
+        label: cycleInfo.label,
+        timeRange: cycleInfo.timeRange,
+        startTime: cycleInfo.startTime,
+        endTime: cycleInfo.endTime,
+        color: cycleInfo.color,
+        bgColor: cycleInfo.bgColor,
+        icon: cycleInfo.icon,
+        hideStartTime: cycleInfo.hideStartTime,
+        code: cycleInfo.code,
+        controlLocation: cycleInfo.controlLocation,
+        controlTime: cycleInfo.controlTime,
+        controlLocation2: cycleInfo.controlLocation2,
+        controlTime2: cycleInfo.controlTime2,
+      };
+    }
+    // fallback：原本的 6 天循環
+    const shift = getShiftForDate(userGroup, dateStr);
+    if (!shift) return null;
+    const defaultCode = shift.type === 'day' ? '701' : shift.type === 'night' ? '732' : 'OFF';
+    const detail = getShiftByCode(defaultCode);
+    return {
+      ...shift,
+      code: defaultCode,
+      controlLocation: detail?.controlLocation,
+      controlTime: detail?.controlTime,
+      controlLocation2: detail?.controlLocation2,
+      controlTime2: detail?.controlTime2,
+    };
   };
 
   const tomorrowShift = getTodayOrTomorrowShift(tomorrowStr);
   const todayShift = getTodayOrTomorrowShift(todayStr);
 
-  // 查詢今日/明日請假狀態
+  // 查詢今日/明日請假狀態（優先使用逐日審核狀態）
   function findLeaveForDate(dateStr: string) {
-    return myRequests
+    const matched = myRequests
       .filter((r) => r.status !== 'cancelled' && dateStr >= r.start_date && dateStr <= r.end_date)
       .sort((a, b) => {
         const priority: Record<string, number> = { approved: 3, pending: 2, rejected: 1 };
         return (priority[b.status] || 0) - (priority[a.status] || 0);
       })[0];
+
+    if (!matched) return undefined;
+
+    // 有逐日審核紀錄的話，以該日狀態為準
+    const dayMap = getRequestDayStatusMap(matched.id);
+    if (dayMap[dateStr]) {
+      return { ...matched, status: dayMap[dateStr] as LeaveRequest['status'] };
+    }
+
+    return matched;
   }
   const todayLeave = findLeaveForDate(todayStr);
   const tomorrowLeave = findLeaveForDate(tomorrowStr);
@@ -96,6 +153,8 @@ export default function DashboardPage() {
         return { text: '待審', bg: 'bg-amber-100', color: 'text-amber-700', icon: 'ri-time-line' };
       case 'rejected':
         return { text: '駁回', bg: 'bg-red-100', color: 'text-red-700', icon: 'ri-close-line' };
+      case 'cancelled':
+        return { text: '已取消', bg: 'bg-stone-100', color: 'text-stone-500', icon: 'ri-forbid-line' };
       default:
         return null;
     }
@@ -105,13 +164,14 @@ export default function DashboardPage() {
   const [shiftRefreshKey, setShiftRefreshKey] = useState(0);
   const weekShifts = useMemo(
     () => (userGroup ? getUserWeekShifts(user?.id || '', userGroup) : []),
-    [userGroup, user?.id, shiftRefreshKey],
+    [userGroup, user?.id, shiftRefreshKey, cycleVersion],
   );
 
   const statusConfig: Record<string, { label: string; color: string; dot: string; bg: string }> = {
     pending: { label: t('pending'), color: 'text-amber-700', dot: 'bg-amber-500', bg: 'bg-amber-50 border-amber-200' },
     approved: { label: t('approved'), color: 'text-emerald-700', dot: 'bg-emerald-500', bg: 'bg-emerald-50 border-emerald-200' },
     rejected: { label: t('rejected'), color: 'text-red-700', dot: 'bg-red-500', bg: 'bg-red-50 border-red-200' },
+    cancelled: { label: '已取消', color: 'text-stone-500', dot: 'bg-stone-400', bg: 'bg-stone-100 border-stone-200' },
   };
 
   // 假別使用統計
@@ -154,8 +214,8 @@ export default function DashboardPage() {
 
       <div className="relative z-10">
       {/* Header */}
-      <div className="bg-white/80 backdrop-blur-sm px-4 py-5 border-b border-white/40">
-        <div className="flex items-center justify-between max-w-lg mx-auto">
+      <div className="bg-white/80 backdrop-blur-sm px-4 md:px-8 py-5 border-b border-white/40">
+        <div className="flex items-center justify-between max-w-7xl mx-auto">
           <div>
             <p className="text-xs text-stone-500">{t('welcome')}</p>
             <h1 className="text-lg font-bold text-stone-800">{user?.name}</h1>
@@ -175,7 +235,7 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      <div className="max-w-lg mx-auto px-4 py-5 space-y-5">
+      <div className="max-w-7xl mx-auto px-4 md:px-8 py-5 space-y-5 md:space-y-8">
         {/* 管理者公告圖片 */}
         <div>
           <div className="flex items-center justify-between mb-2">
@@ -194,16 +254,21 @@ export default function DashboardPage() {
             {announcements.map((item) => (
               <div
                 key={item.id}
-                className="flex-shrink-0 w-[260px] rounded-xl overflow-hidden border border-white/30 bg-white/75 backdrop-blur-sm cursor-pointer hover:shadow-md transition-shadow shadow-sm"
+                className="flex-shrink-0 w-[260px] md:w-[420px] rounded-xl overflow-hidden border border-white/30 bg-white/75 backdrop-blur-sm cursor-pointer hover:shadow-md transition-shadow shadow-sm"
                 onClick={() => {
                   if (item.imageUrl) {
-                    setLightboxImage(item.imageUrl);
-                    setLightboxTitle(item.title);
+                    if (isGoogleDriveUrl(item.rawUrl)) {
+                      setDrivePreviewUrl(getGoogleDrivePreviewUrl(item.rawUrl));
+                      setDrivePreviewTitle(item.title);
+                    } else {
+                      setLightboxImage(item.imageUrl);
+                      setLightboxTitle(item.title);
+                    }
                   }
                 }}
               >
                 {item.imageUrl ? (
-                  <div className="w-full h-[130px] overflow-hidden">
+                  <div className="w-full h-[130px] md:h-[240px] overflow-hidden">
                     <img
                       src={convertGoogleDriveUrl(item.imageUrl)}
                       alt={item.title}
@@ -211,19 +276,19 @@ export default function DashboardPage() {
                     />
                   </div>
                 ) : (
-                  <div className="w-full h-[130px] bg-stone-100/50 flex items-center justify-center">
+                  <div className="w-full h-[130px] md:h-[240px] bg-stone-100/50 flex items-center justify-center">
                     <div className="text-center">
-                      <i className="ri-article-line text-3xl text-stone-300" />
-                      <p className="text-[10px] text-stone-400 mt-1">文字公告</p>
+                      <i className="ri-article-line text-3xl md:text-5xl text-stone-300" />
+                      <p className="text-[10px] md:text-sm text-stone-400 mt-1">文字公告</p>
                     </div>
                   </div>
                 )}
-                <div className="p-3">
-                  <p className="text-xs font-medium text-stone-700">{item.title}</p>
+                <div className="p-3 md:p-4">
+                  <p className="text-xs md:text-sm font-medium text-stone-700">{item.title}</p>
                   <div className="flex items-center justify-between mt-1">
-                    <span className="text-[10px] text-stone-400">{item.date}</span>
-                    <span className="text-[10px] text-stone-400 flex items-center gap-0.5">
-                      <i className="ri-user-star-line text-[9px]" />
+                    <span className="text-[10px] md:text-xs text-stone-400">{item.date}</span>
+                    <span className="text-[10px] md:text-xs text-stone-400 flex items-center gap-0.5">
+                      <i className="ri-user-star-line text-[9px] md:text-xs" />
                       {item.manager}
                     </span>
                   </div>
@@ -234,7 +299,7 @@ export default function DashboardPage() {
         </div>
 
         {/* Stats Cards */}
-        <div className="grid grid-cols-4 gap-2">
+        <div className="grid grid-cols-4 gap-2 md:gap-4">
           <div className="bg-white/70 backdrop-blur-sm rounded-xl p-2.5 border border-white/30 text-center shadow-sm">
             <p className="text-xl font-bold text-amber-600">{pendingCount}</p>
             <p className="text-[10px] text-stone-500 mt-0.5">{t('pending')}</p>
@@ -255,66 +320,160 @@ export default function DashboardPage() {
 
         {/* 今日與明日班表 */}
         {userGroup && (
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-2 gap-3 md:gap-4">
             {/* 今日班表 */}
             {todayShift && (
-              <div className={`rounded-xl p-4 border border-white/30 bg-white/60 backdrop-blur-sm`}>
-                <div className="flex items-center justify-between gap-1 mb-2">
-                  <div className="flex items-center gap-2">
-                    <div className={`w-7 h-7 rounded-lg flex items-center justify-center bg-white/40`}>
-                      <i className={`${todayShift.icon} text-sm ${todayShift.color}`} />
+              <div className="rounded-xl p-4 border border-white/30 bg-white/60 backdrop-blur-sm">
+                {/* 班別資訊 */}
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between gap-1 mb-2">
+                      <div className="flex items-center gap-2">
+                        <div className="w-7 h-7 rounded-lg flex items-center justify-center bg-white/40">
+                          <i className={`${todayShift.icon} text-sm ${todayShift.color}`} />
+                        </div>
+                        <div>
+                          <p className="text-[10px] text-stone-500">今日班別</p>
+                          <p className={`text-sm font-bold ${todayShift.color}`}>{todayShift.label}</p>
+                        </div>
+                      </div>
+                      {todayLeave && leaveBadgeClass(todayLeave.status) && (
+                        <span className={`inline-flex items-center gap-[1px] text-[9px] font-bold px-1.5 py-[2px] rounded-full ${leaveBadgeClass(todayLeave.status)!.bg} ${leaveBadgeClass(todayLeave.status)!.color}`}>
+                          <i className={`${leaveBadgeClass(todayLeave.status)!.icon} text-[8px]`} />
+                          {leaveBadgeClass(todayLeave.status)!.text}
+                        </span>
+                      )}
                     </div>
-                    <div>
-                      <p className="text-[10px] text-stone-500">今日班別</p>
-                      <p className={`text-sm font-bold ${todayShift.color}`}>{todayShift.label}</p>
-                    </div>
+                    {todayShift.type !== 'rest' && !todayShift.hideStartTime && (
+                      <div className="flex items-center gap-1.5">
+                        <i className="ri-time-line text-stone-400 text-[10px]" />
+                        <p className="text-xs text-stone-600 font-medium">{todayShift.startTime} 上班</p>
+                      </div>
+                    )}
+                    {todayShift.type === 'rest' && (
+                      <p className="text-xs text-stone-400">例假</p>
+                    )}
                   </div>
-                  {todayLeave && leaveBadgeClass(todayLeave.status) && (
-                    <span className={`inline-flex items-center gap-[1px] text-[9px] font-bold px-1.5 py-[2px] rounded-full ${leaveBadgeClass(todayLeave.status)!.bg} ${leaveBadgeClass(todayLeave.status)!.color}`}>
-                      <i className={`${leaveBadgeClass(todayLeave.status)!.icon} text-[8px]`} />
-                      {leaveBadgeClass(todayLeave.status)!.text}
-                    </span>
-                  )}
                 </div>
-                {todayShift.type !== 'rest' && !todayShift.hideStartTime && (
-                  <div className="flex items-center gap-1.5 mt-1">
-                    <i className="ri-time-line text-stone-400 text-[10px]" />
-                    <p className="text-xs text-stone-600 font-medium">{todayShift.startTime} 上班</p>
+                {/* 管制資訊 - 移到最下面 */}
+                {todayShift.type !== 'rest' && (
+                  <div className="mt-3 pt-3 border-t border-white/30">
+                    <p className="text-[10px] text-stone-400 mb-2">管制資訊</p>
+                    <div className="space-y-1.5">
+                      {/* 第一組 */}
+                      {(todayShift.controlLocation && todayShift.controlLocation !== '-') || (todayShift.controlTime && todayShift.controlTime !== '-') ? (
+                        <div className="flex items-center gap-3 text-[10px]">
+                          {todayShift.controlLocation && todayShift.controlLocation !== '-' && (
+                            <span className="inline-flex items-center gap-0.5 text-rose-500 font-medium">
+                              <i className="ri-map-pin-line text-[9px]" />
+                              {todayShift.controlLocation}
+                            </span>
+                          )}
+                          {todayShift.controlTime && todayShift.controlTime !== '-' && (
+                            <span className="inline-flex items-center gap-0.5 text-amber-600 font-medium">
+                              <i className="ri-alarm-warning-line text-[9px]" />
+                              {todayShift.controlTime}
+                            </span>
+                          )}
+                        </div>
+                      ) : null}
+                      {/* 第二組 */}
+                      {(todayShift.controlLocation2 || todayShift.controlTime2) ? (
+                        <div className="flex items-center gap-3 text-[10px]">
+                          {todayShift.controlLocation2 && todayShift.controlLocation2 !== '-' && (
+                            <span className="inline-flex items-center gap-0.5 text-rose-500 font-medium">
+                              <i className="ri-map-pin-line text-[9px]" />
+                              {todayShift.controlLocation2}
+                            </span>
+                          )}
+                          {todayShift.controlTime2 && todayShift.controlTime2 !== '-' && (
+                            <span className="inline-flex items-center gap-0.5 text-amber-600 font-medium">
+                              <i className="ri-alarm-warning-line text-[9px]" />
+                              {todayShift.controlTime2}
+                            </span>
+                          )}
+                        </div>
+                      ) : null}
+                    </div>
                   </div>
-                )}
-                {(todayShift.type === 'rest') && (
-                  <p className="text-xs text-stone-400 mt-1">例假</p>
                 )}
               </div>
             )}
             {/* 明日班表 */}
             {tomorrowShift && (
-              <div className={`rounded-xl p-4 border border-white/30 bg-white/60 backdrop-blur-sm`}>
-                <div className="flex items-center justify-between gap-1 mb-2">
-                  <div className="flex items-center gap-2">
-                    <div className={`w-7 h-7 rounded-lg flex items-center justify-center bg-white/40`}>
-                      <i className={`${tomorrowShift.icon} text-sm ${tomorrowShift.color}`} />
+              <div className="rounded-xl p-4 border border-white/30 bg-white/60 backdrop-blur-sm">
+                {/* 班別資訊 */}
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between gap-1 mb-2">
+                      <div className="flex items-center gap-2">
+                        <div className="w-7 h-7 rounded-lg flex items-center justify-center bg-white/40">
+                          <i className={`${tomorrowShift.icon} text-sm ${tomorrowShift.color}`} />
+                        </div>
+                        <div>
+                          <p className="text-[10px] text-stone-500">明日工作班</p>
+                          <p className={`text-sm font-bold ${tomorrowShift.color}`}>{tomorrowShift.label}</p>
+                        </div>
+                      </div>
+                      {tomorrowLeave && leaveBadgeClass(tomorrowLeave.status) && (
+                        <span className={`inline-flex items-center gap-[1px] text-[9px] font-bold px-1.5 py-[2px] rounded-full ${leaveBadgeClass(tomorrowLeave.status)!.bg} ${leaveBadgeClass(tomorrowLeave.status)!.color}`}>
+                          <i className={`${leaveBadgeClass(tomorrowLeave.status)!.icon} text-[8px]`} />
+                          {leaveBadgeClass(tomorrowLeave.status)!.text}
+                        </span>
+                      )}
                     </div>
-                    <div>
-                      <p className="text-[10px] text-stone-500">明日工作班</p>
-                      <p className={`text-sm font-bold ${tomorrowShift.color}`}>{tomorrowShift.label}</p>
-                    </div>
+                    {tomorrowShift.type !== 'rest' && !tomorrowShift.hideStartTime && (
+                      <div className="flex items-center gap-1.5">
+                        <i className="ri-time-line text-stone-400 text-[10px]" />
+                        <p className="text-xs text-stone-600 font-medium">{tomorrowShift.startTime} 上班</p>
+                      </div>
+                    )}
+                    {tomorrowShift.type === 'rest' && (
+                      <p className="text-xs text-stone-400">例假</p>
+                    )}
                   </div>
-                  {tomorrowLeave && leaveBadgeClass(tomorrowLeave.status) && (
-                    <span className={`inline-flex items-center gap-[1px] text-[9px] font-bold px-1.5 py-[2px] rounded-full ${leaveBadgeClass(tomorrowLeave.status)!.bg} ${leaveBadgeClass(tomorrowLeave.status)!.color}`}>
-                      <i className={`${leaveBadgeClass(tomorrowLeave.status)!.icon} text-[8px]`} />
-                      {leaveBadgeClass(tomorrowLeave.status)!.text}
-                    </span>
-                  )}
                 </div>
-                {tomorrowShift.type !== 'rest' && !tomorrowShift.hideStartTime && (
-                  <div className="flex items-center gap-1.5 mt-1">
-                    <i className="ri-time-line text-stone-400 text-[10px]" />
-                    <p className="text-xs text-stone-600 font-medium">{tomorrowShift.startTime} 上班</p>
+                {/* 管制資訊 - 移到最下面 */}
+                {tomorrowShift.type !== 'rest' && (
+                  <div className="mt-3 pt-3 border-t border-white/30">
+                    <p className="text-[10px] text-stone-400 mb-2">管制資訊</p>
+                    <div className="space-y-1.5">
+                      {/* 第一組 */}
+                      {(tomorrowShift.controlLocation && tomorrowShift.controlLocation !== '-') || (tomorrowShift.controlTime && tomorrowShift.controlTime !== '-') ? (
+                        <div className="flex items-center gap-3 text-[10px]">
+                          {tomorrowShift.controlLocation && tomorrowShift.controlLocation !== '-' && (
+                            <span className="inline-flex items-center gap-0.5 text-rose-500 font-medium">
+                              <i className="ri-map-pin-line text-[9px]" />
+                              {tomorrowShift.controlLocation}
+                            </span>
+                          )}
+                          {tomorrowShift.controlTime && tomorrowShift.controlTime !== '-' && (
+                            <span className="inline-flex items-center gap-0.5 text-amber-600 font-medium">
+                              <i className="ri-alarm-warning-line text-[9px]" />
+                              {tomorrowShift.controlTime}
+                            </span>
+                          )}
+                        </div>
+                      ) : null}
+                      {/* 第二組 */}
+                      {(tomorrowShift.controlLocation2 || tomorrowShift.controlTime2) ? (
+                        <div className="flex items-center gap-3 text-[10px]">
+                          {tomorrowShift.controlLocation2 && tomorrowShift.controlLocation2 !== '-' && (
+                            <span className="inline-flex items-center gap-0.5 text-rose-500 font-medium">
+                              <i className="ri-map-pin-line text-[9px]" />
+                              {tomorrowShift.controlLocation2}
+                            </span>
+                          )}
+                          {tomorrowShift.controlTime2 && tomorrowShift.controlTime2 !== '-' && (
+                            <span className="inline-flex items-center gap-0.5 text-amber-600 font-medium">
+                              <i className="ri-alarm-warning-line text-[9px]" />
+                              {tomorrowShift.controlTime2}
+                            </span>
+                          )}
+                        </div>
+                      ) : null}
+                    </div>
                   </div>
-                )}
-                {(tomorrowShift.type === 'rest') && (
-                  <p className="text-xs text-stone-400 mt-1">例假</p>
                 )}
               </div>
             )}
@@ -379,46 +538,46 @@ export default function DashboardPage() {
         {user?.role === 'manager' && (
           <div>
             <h2 className="text-sm font-semibold text-stone-700 mb-3">管理功能</h2>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-5">
               <button
                 onClick={() => navigate('/admin/approval')}
-                className="bg-violet-600 hover:bg-violet-700 text-white rounded-xl p-4 text-left transition-colors"
+                className="bg-violet-600 hover:bg-violet-700 text-white rounded-xl p-4 md:p-6 text-left transition-colors"
               >
-                <div className="w-10 h-10 bg-white/20 rounded-lg flex items-center justify-center mb-2">
-                  <i className="ri-list-check text-xl" />
+                <div className="w-10 h-10 md:w-14 md:h-14 bg-white/20 rounded-lg flex items-center justify-center mb-2 md:mb-3">
+                  <i className="ri-list-check text-xl md:text-2xl" />
                 </div>
-                <p className="font-medium text-sm">請假審核</p>
-                <p className="text-xs text-violet-100 mt-0.5">審核員工請假申請</p>
+                <p className="font-medium text-sm md:text-base">請假審核</p>
+                <p className="text-xs md:text-sm text-violet-100 mt-0.5">審核員工請假申請</p>
               </button>
               <button
                 onClick={() => navigate('/admin/employees')}
-                className="bg-sky-600 hover:bg-sky-700 text-white rounded-xl p-4 text-left transition-colors"
+                className="bg-sky-600 hover:bg-sky-700 text-white rounded-xl p-4 md:p-6 text-left transition-colors"
               >
-                <div className="w-10 h-10 bg-white/20 rounded-lg flex items-center justify-center mb-2">
-                  <i className="ri-team-line text-xl" />
+                <div className="w-10 h-10 md:w-14 md:h-14 bg-white/20 rounded-lg flex items-center justify-center mb-2 md:mb-3">
+                  <i className="ri-team-line text-xl md:text-2xl" />
                 </div>
-                <p className="font-medium text-sm">員工管理</p>
-                <p className="text-xs text-sky-100 mt-0.5">查看與編輯所有員工</p>
+                <p className="font-medium text-sm md:text-base">員工管理</p>
+                <p className="text-xs md:text-sm text-sky-100 mt-0.5">查看與編輯所有員工</p>
               </button>
               <button
                 onClick={() => navigate('/admin/announcements')}
-                className="bg-amber-500 hover:bg-amber-600 text-white rounded-xl p-4 text-left transition-colors"
+                className="bg-amber-500 hover:bg-amber-600 text-white rounded-xl p-4 md:p-6 text-left transition-colors"
               >
-                <div className="w-10 h-10 bg-white/20 rounded-lg flex items-center justify-center mb-2">
-                  <i className="ri-image-line text-xl" />
+                <div className="w-10 h-10 md:w-14 md:h-14 bg-white/20 rounded-lg flex items-center justify-center mb-2 md:mb-3">
+                  <i className="ri-image-line text-xl md:text-2xl" />
                 </div>
-                <p className="font-medium text-sm">公告管理</p>
-                <p className="text-xs text-amber-100 mt-0.5">新增公告與圖片</p>
+                <p className="font-medium text-sm md:text-base">公告管理</p>
+                <p className="text-xs md:text-sm text-amber-100 mt-0.5">新增公告與圖片</p>
               </button>
               <button
                 onClick={() => navigate('/admin/shift')}
-                className="bg-teal-600 hover:bg-teal-700 text-white rounded-xl p-4 text-left transition-colors"
+                className="bg-teal-600 hover:bg-teal-700 text-white rounded-xl p-4 md:p-6 text-left transition-colors"
               >
-                <div className="w-10 h-10 bg-white/20 rounded-lg flex items-center justify-center mb-2">
-                  <i className="ri-table-line text-xl" />
+                <div className="w-10 h-10 md:w-14 md:h-14 bg-white/20 rounded-lg flex items-center justify-center mb-2 md:mb-3">
+                  <i className="ri-table-line text-xl md:text-2xl" />
                 </div>
-                <p className="font-medium text-sm">班表管理</p>
-                <p className="text-xs text-teal-100 mt-0.5">設定 A/B 組班表連結</p>
+                <p className="font-medium text-sm md:text-base">班表管理</p>
+                <p className="text-xs md:text-sm text-teal-100 mt-0.5">班表連結、班次時間、管制地點設定</p>
               </button>
             </div>
           </div>
@@ -427,36 +586,36 @@ export default function DashboardPage() {
         {/* Quick Actions */}
         <div>
           <h2 className="text-sm font-semibold text-stone-700 mb-3">{t('quick_actions')}</h2>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-3 md:gap-5">
             <button
               onClick={() => navigate('/leave/apply')}
-              className="bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl p-4 text-left transition-colors"
+              className="bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl p-4 md:p-6 text-left transition-colors"
             >
-              <div className="w-10 h-10 bg-white/20 rounded-lg flex items-center justify-center mb-2">
-                <i className="ri-add-line text-xl" />
+              <div className="w-10 h-10 md:w-14 md:h-14 bg-white/20 rounded-lg flex items-center justify-center mb-2 md:mb-3">
+                <i className="ri-add-line text-xl md:text-2xl" />
               </div>
-              <p className="font-medium text-sm">{t('leave_apply')}</p>
-              <p className="text-xs text-emerald-100 mt-0.5">提交新的請假申請</p>
+              <p className="font-medium text-sm md:text-base">{t('leave_apply')}</p>
+              <p className="text-xs md:text-sm text-emerald-100 mt-0.5">提交新的請假申請</p>
             </button>
             <button
               onClick={() => navigate('/shift')}
-              className="bg-white/75 backdrop-blur-sm hover:bg-white/90 border border-white/30 text-stone-800 rounded-xl p-4 text-left transition-colors shadow-sm"
+              className="bg-white/75 backdrop-blur-sm hover:bg-white/90 border border-white/30 text-stone-800 rounded-xl p-4 md:p-6 text-left transition-colors shadow-sm"
             >
-              <div className="w-10 h-10 bg-stone-100 rounded-lg flex items-center justify-center mb-2">
-                <i className="ri-table-line text-xl text-stone-600" />
+              <div className="w-10 h-10 md:w-14 md:h-14 bg-stone-100 rounded-lg flex items-center justify-center mb-2 md:mb-3">
+                <i className="ri-table-line text-xl md:text-2xl text-stone-600" />
               </div>
-              <p className="font-medium text-sm">當月班表</p>
-              <p className="text-xs text-stone-500 mt-0.5">查看所有人排班</p>
+              <p className="font-medium text-sm md:text-base">當月班表</p>
+              <p className="text-xs md:text-sm text-stone-500 mt-0.5">查看所有人排班</p>
             </button>
             <button
               onClick={() => navigate('/schedule')}
-              className="bg-white/75 backdrop-blur-sm hover:bg-white/90 border border-white/30 text-stone-800 rounded-xl p-4 text-left transition-colors shadow-sm"
+              className="bg-white/75 backdrop-blur-sm hover:bg-white/90 border border-white/30 text-stone-800 rounded-xl p-4 md:p-6 text-left transition-colors shadow-sm"
             >
-              <div className="w-10 h-10 bg-stone-100 rounded-lg flex items-center justify-center mb-2">
-                <i className="ri-calendar-line text-xl text-stone-600" />
+              <div className="w-10 h-10 md:w-14 md:h-14 bg-stone-100 rounded-lg flex items-center justify-center mb-2 md:mb-3">
+                <i className="ri-calendar-line text-xl md:text-2xl text-stone-600" />
               </div>
-              <p className="font-medium text-sm">{t('schedule')}</p>
-              <p className="text-xs text-stone-500 mt-0.5">查看請假是否通過以及排序</p>
+              <p className="font-medium text-sm md:text-base">{t('schedule')}</p>
+              <p className="text-xs md:text-sm text-stone-500 mt-0.5">查看請假是否通過以及排序</p>
             </button>
           </div>
         </div>
@@ -467,7 +626,7 @@ export default function DashboardPage() {
             <h2 className="text-sm font-semibold text-stone-700">假別統計</h2>
             <span className="text-[10px] text-stone-400">已用 / 剩餘</span>
           </div>
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2 md:gap-3">
             {leaveTypes.map((type) => {
               const used = usedDays(type.id);
               const total = totalDays(type.id);
@@ -540,7 +699,7 @@ export default function DashboardPage() {
               <p className="text-sm text-stone-400">{t('no_records')}</p>
             </div>
           ) : (
-            <div className="space-y-2">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2 md:gap-3">
               {recentLeaves.map((req) => {
                 const status = statusConfig[req.status];
                 const typeInfo = leaveTypes.find((t) => t.id === req.leave_type);
@@ -586,6 +745,18 @@ export default function DashboardPage() {
             onClose={() => {
               setLightboxImage(null);
               setLightboxTitle('');
+            }}
+          />
+        )}
+
+        {/* Drive Preview Modal */}
+        {drivePreviewUrl && (
+          <DrivePreviewModal
+            src={drivePreviewUrl}
+            title={drivePreviewTitle}
+            onClose={() => {
+              setDrivePreviewUrl(null);
+              setDrivePreviewTitle('');
             }}
           />
         )}
