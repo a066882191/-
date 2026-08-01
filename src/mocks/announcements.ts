@@ -119,18 +119,30 @@ export function useAnnouncements(): Announcement[] {
     let mounted = true;
 
     async function fetchAnnouncements() {
-      const { data, error } = await supabase
-        .from('announcements')
-        .select('*')
-        .order('created_at', { ascending: false });
+      try {
+        const { data, error } = await supabase
+          .from('announcements')
+          .select('*')
+          .order('created_at', { ascending: false });
 
-      if (!mounted) return;
-      if (error) {
-        console.error('公告讀取失敗', error);
-        return;
-      }
-      if (data && data.length > 0) {
-        setItems(data.map(toAnnouncement));
+        if (!mounted) return;
+        if (error) {
+          console.error('公告讀取失敗', error);
+          return;
+        }
+        if (data && data.length > 0) {
+          setItems(data.map((row) => {
+            try {
+              return toAnnouncement(row);
+            } catch (mapErr) {
+              console.error('公告資料轉換失敗', mapErr, row);
+              return null;
+            }
+          }).filter((item): item is Announcement => item !== null));
+        }
+      } catch (err) {
+        if (!mounted) return;
+        console.error('公告載入異常', err);
       }
     }
 

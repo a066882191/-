@@ -46,6 +46,7 @@ let dayApprovals: DayApproval[] = [];
 let dayCancellations: DayCancellation[] = [];
 const listeners = new Set<() => void>();
 let isLoading = false;
+let loadError: string | null = null;
 
 function emit() {
   listeners.forEach((l) => l());
@@ -89,6 +90,7 @@ export async function loadLeaveRequests(): Promise<void> {
       return;
     }
 
+    loadError = null;
     requests = (data || []).map(mapRow);
     emit();
 
@@ -97,6 +99,8 @@ export async function loadLeaveRequests(): Promise<void> {
     await loadDayCancellationsSilent();
   } catch (err) {
     console.error('載入請假紀錄異常:', err);
+    loadError = err instanceof Error ? err.message : '載入請假資料時發生錯誤';
+    emit();
   } finally {
     isLoading = false;
   }
@@ -183,32 +187,37 @@ export async function cancelLeaveDay(
   date: string,
   employeeId: string,
 ): Promise<void> {
-  // 檢查該天是否已被管理端審核過（已核准或已駁回的不能取消）
-  const dayMap = getRequestDayStatusMap(requestId);
-  if (dayMap[date]) {
-    throw new Error(`${date} 已被審核，無法取消`);
+  try {
+    // 檢查該天是否已被管理端審核過（已核准或已駁回的不能取消）
+    const dayMap = getRequestDayStatusMap(requestId);
+    if (dayMap[date]) {
+      throw new Error(`${date} 已被審核，無法取消`);
+    }
+
+    const { error } = await supabase
+      .from('leave_day_cancellations')
+      .upsert(
+        {
+          request_id: requestId,
+          date,
+          employee_id: employeeId,
+        },
+        { onConflict: 'request_id,date' },
+      );
+
+    if (error) {
+      console.error('逐日取消失敗:', error);
+      throw new Error(error.message);
+    }
+
+    await loadDayCancellationsSilent();
+
+    // 如果所有天數都被取消，也把整筆申請狀態更新為 cancelled
+    await syncRequestStatusIfAllCancelled(requestId);
+  } catch (err) {
+    console.error('逐日取消異常:', err);
+    throw err;
   }
-
-  const { error } = await supabase
-    .from('leave_day_cancellations')
-    .upsert(
-      {
-        request_id: requestId,
-        date,
-        employee_id: employeeId,
-      },
-      { onConflict: 'request_id,date' },
-    );
-
-  if (error) {
-    console.error('逐日取消失敗:', error);
-    throw new Error(error.message);
-  }
-
-  await loadDayCancellationsSilent();
-
-  // 如果所有天數都被取消，也把整筆申請狀態更新為 cancelled
-  await syncRequestStatusIfAllCancelled(requestId);
 }
 
 /**
@@ -219,62 +228,75 @@ export async function cancelLeaveDays(
   dates: string[],
   employeeId: string,
 ): Promise<{ success: boolean; error?: string; cancelledCount: number }> {
-  if (dates.length === 0) {
-    return { success: false, error: '請至少選取一天', cancelledCount: 0 };
+  try {
+    if (dates.length === 0) {
+      return { success: false, error: '請至少選取一天', cancelledCount: 0 };
+    }
+
+    // 檢查是否有已被審核的天
+    const dayMap = getRequestDayStatusMap(requestId);
+    const blockedDates = dates.filter((d) => dayMap[d]);
+    if (blockedDates.length > 0) {
+      throw new Error(`${blockedDates.join('、')} 已被審核，無法取消`);
+    }
+
+    const rows = dates.map((date) => ({
+      request_id: requestId,
+      date,
+      employee_id: employeeId,
+    }));
+
+    const { error } = await supabase
+      .from('leave_day_cancellations')
+      .upsert(rows, { onConflict: 'request_id,date' });
+
+    if (error) {
+      console.error('批次逐日取消失敗:', error);
+      return { success: false, error: error.message, cancelledCount: 0 };
+    }
+
+    await loadDayCancellationsSilent();
+
+    // 如果所有天數都被取消，也把整筆申請狀態更新為 cancelled
+    await syncRequestStatusIfAllCancelled(requestId);
+
+    return { success: true, cancelledCount: dates.length };
+  } catch (err) {
+    console.error('批次逐日取消異常:', err);
+    return { success: false, error: err instanceof Error ? err.message : '取消失敗，請稍後再試', cancelledCount: 0 };
   }
-
-  // 檢查是否有已被審核的天
-  const dayMap = getRequestDayStatusMap(requestId);
-  const blockedDates = dates.filter((d) => dayMap[d]);
-  if (blockedDates.length > 0) {
-    throw new Error(`${blockedDates.join('、')} 已被審核，無法取消`);
-  }
-
-  const rows = dates.map((date) => ({
-    request_id: requestId,
-    date,
-    employee_id: employeeId,
-  }));
-
-  const { error } = await supabase
-    .from('leave_day_cancellations')
-    .upsert(rows, { onConflict: 'request_id,date' });
-
-  if (error) {
-    console.error('批次逐日取消失敗:', error);
-    return { success: false, error: error.message, cancelledCount: 0 };
-  }
-
-  await loadDayCancellationsSilent();
-
-  // 如果所有天數都被取消，也把整筆申請狀態更新為 cancelled
-  await syncRequestStatusIfAllCancelled(requestId);
-
-  return { success: true, cancelledCount: dates.length };
 }
 
 /**
  * 檢查某筆申請是否所有日都被取消，如果是就把整筆狀態設為 cancelled
  */
 async function syncRequestStatusIfAllCancelled(requestId: string): Promise<void> {
-  const req = requests.find((r) => r.id === requestId);
-  if (!req || req.status !== 'pending') return;
+  try {
+    const req = requests.find((r) => r.id === requestId);
+    if (!req || req.status !== 'pending') return;
 
-  const cancelledDays = getCancelledDaysForRequest(requestId);
-  const start = new Date(req.start_date + 'T00:00:00');
-  const end = new Date(req.end_date + 'T00:00:00');
-  const totalDays = Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1;
+    const cancelledDays = getCancelledDaysForRequest(requestId);
+    const start = new Date(req.start_date + 'T00:00:00');
+    const end = new Date(req.end_date + 'T00:00:00');
+    const totalDays = Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1;
 
-  if (cancelledDays.length >= totalDays) {
-    await supabase
-      .from('leave_requests')
-      .update({
-        status: 'cancelled',
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', requestId);
+    if (cancelledDays.length >= totalDays) {
+      const { error } = await supabase
+        .from('leave_requests')
+        .update({
+          status: 'cancelled',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', requestId);
 
-    await loadLeaveRequests();
+      if (error) {
+        console.error('同步取消狀態失敗:', error);
+      }
+
+      await loadLeaveRequests();
+    }
+  } catch (err) {
+    console.error('同步取消狀態異常:', err);
   }
 }
 
@@ -366,35 +388,40 @@ export async function addLeaveRequest(
 
   const typeName = data.leave_type_name || leaveTypes.find((t) => t.id === data.leave_type)?.name || data.leave_type;
 
-  const { data: inserted, error } = await supabase
-    .from('leave_requests')
-    .insert({
-      employee_id: data.employee_id,
-      employee_name: data.employee_name,
-      leave_type: data.leave_type,
-      leave_type_name: typeName,
-      start_date: data.start_date,
-      end_date: data.end_date,
-      start_time: data.start_time || '09:00',
-      end_time: data.end_time || '18:00',
-      days_count: data.days_count,
-      reason: data.reason,
-      work_shift: data.work_shift || '',
-      status: 'pending',
-      approver_id: null,
-      approver_comment: '',
-    })
-    .select()
-    .single();
+  try {
+    const { data: inserted, error } = await supabase
+      .from('leave_requests')
+      .insert({
+        employee_id: data.employee_id,
+        employee_name: data.employee_name,
+        leave_type: data.leave_type,
+        leave_type_name: typeName,
+        start_date: data.start_date,
+        end_date: data.end_date,
+        start_time: data.start_time || '09:00',
+        end_time: data.end_time || '18:00',
+        days_count: data.days_count,
+        reason: data.reason,
+        work_shift: data.work_shift || '',
+        status: 'pending',
+        approver_id: null,
+        approver_comment: '',
+      })
+      .select()
+      .single();
 
-  if (error) {
-    console.error('新增請假申請失敗:', error);
-    throw new Error(error.message);
+    if (error) {
+      console.error('新增請假申請失敗:', error);
+      throw new Error(error.message);
+    }
+
+    // 重新載入以確保資料一致性
+    await loadLeaveRequests();
+    return mapRow(inserted);
+  } catch (err) {
+    console.error('新增請假申請異常:', err);
+    throw err instanceof Error ? err : new Error('新增申請失敗，請稍後再試');
   }
-
-  // 重新載入以確保資料一致性
-  await loadLeaveRequests();
-  return mapRow(inserted);
 }
 
 // ========== 逐日審核 ==========
@@ -473,27 +500,32 @@ export async function approveRejectDay(
   approverId: string,
   comment: string = '',
 ): Promise<void> {
-  // 以 (request_id, date) 為唯一鍵做 upsert：
-  // 同一天重複審核只會覆寫「那一天」，不會影響其他天。
-  const { error } = await supabase
-    .from('leave_day_approvals')
-    .upsert(
-      {
-        request_id: requestId,
-        date,
-        status: dayStatus,
-        approver_id: approverId,
-        approver_comment: comment,
-      },
-      { onConflict: 'request_id,date' },
-    );
+  try {
+    // 以 (request_id, date) 為唯一鍵做 upsert：
+    // 同一天重複審核只會覆寫「那一天」，不會影響其他天。
+    const { error } = await supabase
+      .from('leave_day_approvals')
+      .upsert(
+        {
+          request_id: requestId,
+          date,
+          status: dayStatus,
+          approver_id: approverId,
+          approver_comment: comment,
+        },
+        { onConflict: 'request_id,date' },
+      );
 
-  if (error) {
-    console.error('逐日審核失敗:', error);
-    throw new Error(error.message);
+    if (error) {
+      console.error('逐日審核失敗:', error);
+      throw new Error(error.message);
+    }
+
+    await loadDayApprovals();
+  } catch (err) {
+    console.error('逐日審核異常:', err);
+    throw err instanceof Error ? err : new Error('審核操作失敗，請稍後再試');
   }
-
-  await loadDayApprovals();
 }
 
 /**
@@ -503,18 +535,23 @@ export async function removeDayApproval(
   requestId: string,
   date: string,
 ): Promise<void> {
-  const { error } = await supabase
-    .from('leave_day_approvals')
-    .delete()
-    .eq('request_id', requestId)
-    .eq('date', date);
+  try {
+    const { error } = await supabase
+      .from('leave_day_approvals')
+      .delete()
+      .eq('request_id', requestId)
+      .eq('date', date);
 
-  if (error) {
-    console.error('移除逐日審核失敗:', error);
-    throw new Error(error.message);
+    if (error) {
+      console.error('移除逐日審核失敗:', error);
+      throw new Error(error.message);
+    }
+
+    await loadDayApprovals();
+  } catch (err) {
+    console.error('移除逐日審核異常:', err);
+    throw err instanceof Error ? err : new Error('移除審核操作失敗，請稍後再試');
   }
-
-  await loadDayApprovals();
 }
 
 /**
@@ -566,96 +603,111 @@ export async function updateLeaveStatus(
   approverId: string,
   comment: string
 ) {
-  const { error } = await supabase
-    .from('leave_requests')
-    .update({
-      status,
-      approver_id: approverId,
-      approver_comment: comment,
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', id);
+  try {
+    const { error } = await supabase
+      .from('leave_requests')
+      .update({
+        status,
+        approver_id: approverId,
+        approver_comment: comment,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', id);
 
-  if (error) {
-    console.error('更新請假狀態失敗:', error);
-    throw new Error(error.message);
+    if (error) {
+      console.error('更新請假狀態失敗:', error);
+      throw new Error(error.message);
+    }
+
+    await loadLeaveRequests();
+  } catch (err) {
+    console.error('更新請假狀態異常:', err);
+    throw err instanceof Error ? err : new Error('更新狀態失敗，請稍後再試');
   }
-
-  await loadLeaveRequests();
 }
 
 export async function cancelLeaveRequest(
   employeeId: string,
   requestId: string
 ): Promise<{ success: boolean; error?: string }> {
-  const idx = requests.findIndex((r) => r.id === requestId && r.employee_id === employeeId);
-  if (idx < 0) {
-    return { success: false, error: '找不到該請假申請' };
+  try {
+    const idx = requests.findIndex((r) => r.id === requestId && r.employee_id === employeeId);
+    if (idx < 0) {
+      return { success: false, error: '找不到該請假申請' };
+    }
+
+    if (requests[idx].status !== 'pending') {
+      return { success: false, error: '僅「待審核」的申請可以取消' };
+    }
+
+    // 檢查是否在請假開始日期前 10 天內（10 天內不可取消）
+    const startDate = new Date(requests[idx].start_date + 'T00:00:00');
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const daysDiff = Math.ceil((startDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+    if (daysDiff < 10) {
+      return { success: false, error: '請假開始日期前 10 天內不可取消' };
+    }
+
+    // 更新 Supabase 狀態
+    const { error } = await supabase
+      .from('leave_requests')
+      .update({
+        status: 'cancelled',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', requestId)
+      .eq('employee_id', employeeId);
+
+    if (error) {
+      console.error('取消請假申請失敗:', error);
+      return { success: false, error: error.message };
+    }
+
+    // 重新載入
+    await loadLeaveRequests();
+    return { success: true };
+  } catch (err) {
+    console.error('取消請假申請異常:', err);
+    return { success: false, error: err instanceof Error ? err.message : '取消失敗，請稍後再試' };
   }
-
-  if (requests[idx].status !== 'pending') {
-    return { success: false, error: '僅「待審核」的申請可以取消' };
-  }
-
-  // 檢查是否在請假開始日期前 10 天內（10 天內不可取消）
-  const startDate = new Date(requests[idx].start_date + 'T00:00:00');
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const daysDiff = Math.ceil((startDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
-  if (daysDiff < 10) {
-    return { success: false, error: '請假開始日期前 10 天內不可取消' };
-  }
-
-  // 更新 Supabase 狀態
-  const { error } = await supabase
-    .from('leave_requests')
-    .update({
-      status: 'cancelled',
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', requestId)
-    .eq('employee_id', employeeId);
-
-  if (error) {
-    console.error('取消請假申請失敗:', error);
-    return { success: false, error: error.message };
-  }
-
-  // 重新載入
-  await loadLeaveRequests();
-  return { success: true };
 }
 
 export async function supervisorCancelLeaveRequest(
   supervisorId: string,
   requestId: string
 ): Promise<{ success: boolean; error?: string }> {
-  const idx = requests.findIndex((r) => r.id === requestId);
-  if (idx < 0) {
-    return { success: false, error: '找不到該請假申請' };
+  try {
+    const idx = requests.findIndex((r) => r.id === requestId);
+    if (idx < 0) {
+      return { success: false, error: '找不到該請假申請' };
+    }
+
+    if (requests[idx].status === 'cancelled') {
+      return { success: false, error: '該申請已取消' };
+    }
+
+    const { error } = await supabase
+      .from('leave_requests')
+      .update({
+        status: 'cancelled',
+        approver_id: supervisorId,
+        approver_comment: supervisorId === requests[idx].employee_id ? '自行取消' : '主管取消',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', requestId);
+
+    if (error) {
+      console.error('取消請假申請失敗:', error);
+      return { success: false, error: error.message };
+    }
+
+    await loadLeaveRequests();
+    return { success: true };
+  } catch (err) {
+    console.error('取消請假申請異常:', err);
+    return { success: false, error: err instanceof Error ? err.message : '取消失敗，請稍後再試' };
   }
-
-  if (requests[idx].status === 'cancelled') {
-    return { success: false, error: '該申請已取消' };
-  }
-
-  const { error } = await supabase
-    .from('leave_requests')
-    .update({
-      status: 'cancelled',
-      approver_id: supervisorId,
-      approver_comment: supervisorId === requests[idx].employee_id ? '自行取消' : '主管取消',
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', requestId);
-
-  if (error) {
-    console.error('取消請假申請失敗:', error);
-    return { success: false, error: error.message };
-  }
-
-  await loadLeaveRequests();
-  return { success: true };
 }
 
 export async function supervisorCancelLeaveDays(
@@ -663,51 +715,76 @@ export async function supervisorCancelLeaveDays(
   dates: string[],
   supervisorId: string,
 ): Promise<{ success: boolean; error?: string; cancelledCount: number }> {
-  if (dates.length === 0) {
-    return { success: false, error: '請至少選取一天', cancelledCount: 0 };
+  try {
+    if (dates.length === 0) {
+      return { success: false, error: '請至少選取一天', cancelledCount: 0 };
+    }
+
+    const rows = dates.map((date) => ({
+      request_id: requestId,
+      date,
+      employee_id: supervisorId,
+    }));
+
+    const { error } = await supabase
+      .from('leave_day_cancellations')
+      .upsert(rows, { onConflict: 'request_id,date' });
+
+    if (error) {
+      console.error('主管逐日取消失敗:', error);
+      return { success: false, error: error.message, cancelledCount: 0 };
+    }
+
+    await loadDayCancellationsSilent();
+    await syncRequestStatusIfAllCancelled(requestId);
+
+    return { success: true, cancelledCount: dates.length };
+  } catch (err) {
+    console.error('主管逐日取消異常:', err);
+    return { success: false, error: err instanceof Error ? err.message : '取消失敗，請稍後再試', cancelledCount: 0 };
   }
-
-  const rows = dates.map((date) => ({
-    request_id: requestId,
-    date,
-    employee_id: supervisorId,
-  }));
-
-  const { error } = await supabase
-    .from('leave_day_cancellations')
-    .upsert(rows, { onConflict: 'request_id,date' });
-
-  if (error) {
-    console.error('主管逐日取消失敗:', error);
-    return { success: false, error: error.message, cancelledCount: 0 };
-  }
-
-  await loadDayCancellationsSilent();
-  await syncRequestStatusIfAllCancelled(requestId);
-
-  return { success: true, cancelledCount: dates.length };
 }
 
 export function useLeaveStore() {
   const [, setTick] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const cb = () => setTick((t) => t + 1);
+    const cb = () => {
+      setTick((t) => t + 1);
+      if (loadError) {
+        setError(loadError);
+      } else {
+        setError(null);
+      }
+    };
     listeners.add(cb);
 
     // 初始載入
     if (requests.length === 0 && !isLoading) {
       setLoading(true);
-      loadLeaveRequests().finally(() => setLoading(false));
+      loadLeaveRequests()
+        .then(() => {
+          if (loadError) setError(loadError);
+        })
+        .catch((err) => {
+          console.error('useLeaveStore 初始載入異常:', err);
+          setError(err instanceof Error ? err.message : '載入資料失敗');
+        })
+        .finally(() => setLoading(false));
     } else if (dayApprovals.length === 0) {
       // 如果 requests 已有但 dayApprovals 還沒載入，補載
-      loadDayApprovals();
+      loadDayApprovals().catch((err) => {
+        console.error('useLeaveStore 補載審核紀錄異常:', err);
+      });
     }
 
     // 補載逐日取消紀錄（獨立於 requests / approvals）
     if (dayCancellations.length === 0) {
-      loadDayCancellations();
+      loadDayCancellations().catch((err) => {
+        console.error('useLeaveStore 補載取消紀錄異常:', err);
+      });
     }
 
     return () => {
@@ -723,6 +800,7 @@ export function useLeaveStore() {
   return {
     requests: getLeaveRequests(),
     loading,
+    error,
     addRequest: addLeaveRequest,
     updateStatus: updateLeaveStatus,
     refresh,

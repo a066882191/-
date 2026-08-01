@@ -39,13 +39,17 @@ export default function AdminAnnouncementsPage() {
           showToast('公告載入失敗：' + error.message);
         } else if (data && data.length > 0) {
           setItems(
-            data.map((row) => ({
-              id: String(row.id),
-              title: String(row.title),
-              date: String(row.date),
-              imageUrl: String(row.image_url || row.imageUrl || ''),
-              manager: String(row.manager),
-            })),
+            data.map((row) => {
+              const rawUrl = String(row.image_url || row.imageUrl || '');
+              return {
+                id: String(row.id),
+                title: String(row.title),
+                date: String(row.date),
+                imageUrl: convertGoogleDriveUrl(rawUrl),
+                rawUrl,
+                manager: String(row.manager),
+              };
+            }),
           );
         }
       } catch (err) {
@@ -98,11 +102,15 @@ export default function AdminAnnouncementsPage() {
     if (!validateForm()) return;
     setIsSubmitting(true);
 
+    const rawUrl = imageUrl.trim();
+    const convertedUrl = convertGoogleDriveUrl(rawUrl);
+
     const newItem: Announcement = {
       id: `ANN-${Date.now()}`,
       title: title.trim(),
       date: formatToday(),
-      imageUrl: imageUrl.trim(),
+      imageUrl: convertedUrl,
+      rawUrl,
       manager: user?.name || '管理者',
     };
 
@@ -141,11 +149,14 @@ export default function AdminAnnouncementsPage() {
     if (!editingId || !validateForm()) return;
     setIsSubmitting(true);
     try {
+      const rawUrl = imageUrl.trim();
+      const convertedUrl = convertGoogleDriveUrl(rawUrl);
+
       const { error } = await supabase
         .from('announcements')
         .update({
           title: title.trim(),
-          image_url: imageUrl.trim(),
+          image_url: rawUrl,
           date: formatToday(),
         })
         .eq('id', editingId);
@@ -160,7 +171,7 @@ export default function AdminAnnouncementsPage() {
       setItems((prev) =>
         prev.map((it) =>
           it.id === editingId
-            ? { ...it, title: title.trim(), imageUrl: imageUrl.trim(), date: formatToday() }
+            ? { ...it, title: title.trim(), imageUrl: convertedUrl, rawUrl, date: formatToday() }
             : it,
         ),
       );
@@ -220,7 +231,7 @@ export default function AdminAnnouncementsPage() {
   function startEdit(item: Announcement) {
     setEditingId(item.id);
     setTitle(item.title);
-    setImageUrl(item.imageUrl);
+    setImageUrl(item.rawUrl);
     setFormError('');
   }
 
